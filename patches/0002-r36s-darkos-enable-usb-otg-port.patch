@@ -1,0 +1,23 @@
+--- a/darkos-r36s-safe-sd2.dts
++++ b/darkos-r36s-sd2fix-otg.dts
+@@ -1697,13 +1697,13 @@
+ 			usb2-phy@100 {
+ 				compatible = "rockchip,rk3326-usb2phy";
+ 				reg = <0x100>;
+ 				#phy-cells = <0x00>;
+ 				interrupts = <0x00 0x44 0x04>;
+ 				interrupt-names = "linestate";
+ 				status = "okay";
+ 				phandle = <0x8c>;
+ 			};
+
+ 			otg-port {
+ 				#phy-cells = <0x00>;
+ 				interrupts = <0x00 0x42 0x04 0x00 0x41 0x04 0x00 0x40 0x04>;
+ 				interrupt-names = "otg-bvalid\0otg-id\0linestate";
+-				status = "disabled";
++				status = "okay";
+ 				phandle = <0x8b>;
+ 			};
+ 		};
+ 	};

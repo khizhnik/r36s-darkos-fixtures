@@ -1,0 +1,9 @@
+NAME        FSTYPE FSVER LABEL    UUID                                 FSAVAIL FSUSE% MOUNTPOINTS
+mmcblk1                                                                               
+└─mmcblk1p1 exfat  1.0   GAMALIB  EA7E-4FF3                             467.6G     2% /opt/system/Tools
+                                                                                      /roms2
+mmcblk0                                                                               
+├─mmcblk0p1 vfat   FAT32 BOOT     1435-404C                              62.8M    36% /boot
+├─mmcblk0p2 btrfs        ROOTFS   0dccdd76-c5c1-4206-9663-943aabd8ee81    4.8G    45% /
+└─mmcblk0p3 exfat  1.0   EASYROMS 79BF-9B23                               2.1G    90% /roms
+zram0                                                                                 

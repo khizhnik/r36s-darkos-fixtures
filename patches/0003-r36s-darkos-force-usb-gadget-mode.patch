@@ -1,0 +1,20 @@
+--- a/darkos-r36s-sd2fix-otg.dts
++++ b/darkos-r36s-sd2fix-otg-peripheral.dts
+@@ -1735,11 +1735,11 @@
+ 	usb@ff300000 {
+ 		compatible = "rockchip,px30-usb\0rockchip,rk3066-usb\0snps,dwc2";
+ 		reg = <0x00 0xff300000 0x00 0x40000>;
+ 		interrupts = <0x00 0x3e 0x04>;
+ 		clocks = <0x02 0x102>;
+ 		clock-names = "otg";
+ 		power-domains = <0x8a 0x05>;
+-		dr_mode = "otg";
++		dr_mode = "peripheral";
+ 		g-np-tx-fifo-size = <0x10>;
+ 		g-rx-fifo-size = <0x118>;
+ 		g-tx-fifo-size = <0x100 0x80 0x80 0x40 0x20 0x10>;
+ 		g-use-dma;
+ 		phys = <0x8b>;
+ 		phy-names = "usb2-phy";
+ 		status = "okay";
+ 		phandle = <0x102>;
