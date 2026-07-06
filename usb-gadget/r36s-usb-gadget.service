@@ -1,0 +1,12 @@
+[Unit]
+Description=R36S USB Ethernet Gadget
+After=local-fs.target systemd-modules-load.service ssh.service
+Wants=ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/ark/bin/r36s-usb-gadget.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target

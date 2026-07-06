@@ -1,0 +1,14 @@
+Module                  Size  Used by
+usb_f_eem              12288  1
+g_ether                12288  0
+usb_f_rndis            20480  2 g_ether
+u_ether                16384  3 usb_f_eem,usb_f_rndis,g_ether
+libcomposite           36864  3 usb_f_eem,usb_f_rndis,g_ether
+exfat                  61440  2
+sch_fq_codel           16384  2
+nfnetlink              12288  1
+ip_tables              24576  0
+x_tables               20480  1 ip_tables
+ipv6                  299008  18
+gpio_keys              16384  0
+dwc2                  118784  0

@@ -1,0 +1,9 @@
+● r36s-usb-gadget.service - R36S USB Ethernet Gadget
+     Loaded: loaded (/etc/systemd/system/r36s-usb-gadget.service; enabled; preset: enabled)
+     Active: active (exited) since Fri 2025-09-05 09:11:14 EEST; 2min 21s ago
+ Invocation: 632c8925cc864f3b95b814b242916202
+    Process: 706 ExecStart=/home/ark/bin/r36s-usb-gadget.sh (code=exited, status=0/SUCCESS)
+   Main PID: 706 (code=exited, status=0/SUCCESS)
+
+Sep 05 09:11:12 <hostname> systemd[1]: Starting r36s-usb-gadget.service - R36S USB Ethernet Gadget...
+Sep 05 09:11:14 <hostname> systemd[1]: Finished r36s-usb-gadget.service - R36S USB Ethernet Gadget.

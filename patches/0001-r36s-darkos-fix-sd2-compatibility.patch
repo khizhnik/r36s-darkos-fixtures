@@ -1,0 +1,10 @@
+--- a/darkos-r36s.dts
++++ b/darkos-r36s-safe-sd2.dts
+@@ -1832 +1832 @@
+-		max-frequency = <0x8f0d180>;
++		max-frequency = <50000000>;
+@@ -1847,4 +1847,0 @@
+-		sd-uhs-sdr12;
+-		sd-uhs-sdr25;
+-		sd-uhs-sdr50;
+-		sd-uhs-sdr104;
