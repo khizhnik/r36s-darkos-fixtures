@@ -1,5 +1,15 @@
 # R36S DTB Patcher
 
+Status:
+Experimental
+
+Validated:
+✓ local DTB patch matrix
+✓ partial patch states
+✓ idempotent apply
+✓ rollback integrity test
+✓ live R36S dArkOSRE hardware test (already patched device)
+
 Small CLI tool for dArkOS on R36S.
 
 Targets only:
