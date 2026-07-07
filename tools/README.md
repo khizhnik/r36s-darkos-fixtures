@@ -31,6 +31,7 @@ Usage:
 reboot manually
 ./r36s-dtb-patcher.sh --rollback
 ./r36s-dtb-patcher.sh --remove-service
+./r36s-dtb-patcher.sh
 ```
 
 What it does:
@@ -54,6 +55,9 @@ Adds:
 
 Notes:
 - Different R36S board revisions and clones may need testing.
+- Launching without arguments on the console opens a `dialog`-based button menu when `dialog` is available.
+- If `dialog` is missing, the script falls back to the older text menu.
+- If no interactive tty is available, the script writes a fallback note to `r36s-dtb-patcher.log` next to the script and prints usage.
 - `--doctor` is read-only.
 - `--apply` does not reboot automatically.
 - `--rollback` restores the latest backup and does not reboot automatically.

@@ -2,15 +2,11 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-REPO_ROOT="$(CDPATH= cd -- "$SCRIPT_DIR/.." && pwd)"
 
 BOOT_DIR="${R36S_DTB_PATCHER_BOOT_DIR:-/boot}"
 TARGET_DTB="${R36S_DTB_PATCHER_TARGET:-$BOOT_DIR/rk3326-r36s-linux.dtb}"
 BACKUP_ROOT="${R36S_DTB_PATCHER_BACKUP_ROOT:-$BOOT_DIR/r36s-dtb-patcher-backups}"
 PC_RECOVERY_COPY="${R36S_DTB_PATCHER_PC_RECOVERY_COPY:-$BOOT_DIR/rk3326-r36s-linux.dtb.pre-r36s-devkit}"
-USB_GADGET_SRC_DIR="$REPO_ROOT/usb-gadget"
-USB_GADGET_SCRIPT_SRC="$USB_GADGET_SRC_DIR/r36s-usb-gadget.sh"
-USB_GADGET_SERVICE_SRC="$USB_GADGET_SRC_DIR/r36s-usb-gadget.service"
 USB_GADGET_TARGET_BIN_DIR="/home/ark/bin"
 USB_GADGET_TARGET_BIN="$USB_GADGET_TARGET_BIN_DIR/r36s-usb-gadget.sh"
 USB_GADGET_TARGET_UNIT="/etc/systemd/system/r36s-usb-gadget.service"
@@ -19,6 +15,10 @@ TMP_DIR=""
 LOG_FILE=""
 BACKUP_DIR=""
 TARGET_BASENAME="$(basename -- "$TARGET_DTB")"
+CONTROLLER_MAPPER_PID=""
+MENU_FALLBACK_LOG="$SCRIPT_DIR/r36s-dtb-patcher.log"
+LAUNCH_DEBUG_LOG="/tmp/r36s-dtb-patcher-launch.log"
+MENU_TITLE="R36S DTB Patcher"
 
 die() {
   printf '%s\n' "$*" >&2
@@ -56,6 +56,10 @@ ensure_dir() {
   else
     maybe_sudo mkdir -p "$path"
   fi
+}
+
+have_cmd() {
+  command -v "$1" >/dev/null 2>&1
 }
 
 copy_file() {
@@ -263,6 +267,259 @@ print_patch_summary() {
   fi
 }
 
+dialog_available() {
+  have_cmd dialog
+}
+
+write_launch_debug_log() {
+  {
+    printf 'date=%s\n' "$(date '+%Y-%m-%d %H:%M:%S')"
+    printf 'whoami=%s\n' "$(whoami 2>/dev/null || printf unknown)"
+    printf 'tty=%s\n' "$(tty 2>/dev/null || printf notty)"
+    printf 'TERM=%s\n' "${TERM:-}"
+    if have_cmd fgconsole; then
+      printf 'fgconsole=%s\n' "$(fgconsole 2>/dev/null || printf failed)"
+    else
+      printf 'fgconsole=%s\n' "missing"
+    fi
+    printf 'dialog=%s\n' "$(command -v dialog 2>/dev/null || printf missing)"
+    printf 'args=%s\n' "${*:-}"
+  } >> "$LAUNCH_DEBUG_LOG" 2>/dev/null || true
+}
+
+append_launch_warning() {
+  printf '%s\n' "$1" >> "$LAUNCH_DEBUG_LOG" 2>/dev/null || true
+}
+
+start_controller_mapping() {
+  local mapper="/opt/inttools/gptokeyb"
+  local keymap="/opt/inttools/keys.gptk"
+  local status_file="/tmp/r36s-dtb-patcher-mapper.status"
+
+  if [ ! -x "$mapper" ]; then
+    append_launch_warning "Controller mapper missing: $mapper"
+    return 1
+  fi
+
+  if [ ! -f "$keymap" ]; then
+    append_launch_warning "Controller keymap missing: $keymap"
+    return 1
+  fi
+
+  if [ -e /dev/uinput ]; then
+    sudo chmod 666 /dev/uinput >/dev/null 2>&1 || true
+    append_launch_warning "uinput perms: $(ls -l /dev/uinput 2>/dev/null || printf missing)"
+  else
+    append_launch_warning "uinput device missing"
+  fi
+
+  if [ -f /opt/inttools/gamecontrollerdb.txt ]; then
+    export SDL_GAMECONTROLLERCONFIG_FILE="/opt/inttools/gamecontrollerdb.txt"
+  fi
+
+  : > "$status_file"
+  "$mapper" -1 "$0" -c "$keymap" >/dev/null 2>"$status_file" &
+  CONTROLLER_MAPPER_PID=$!
+  sleep 0.1
+
+  if kill -0 "$CONTROLLER_MAPPER_PID" 2>/dev/null; then
+    append_launch_warning "Controller mapper started: pid=$CONTROLLER_MAPPER_PID"
+    return 0
+  fi
+
+  append_launch_warning "Controller mapper failed to start: pid=$CONTROLLER_MAPPER_PID"
+  if [ -s "$status_file" ]; then
+    while IFS= read -r line; do
+      append_launch_warning "gptokeyb: $line"
+    done < "$status_file"
+  fi
+  rm -f "$status_file"
+  CONTROLLER_MAPPER_PID=""
+  return 0
+}
+
+stop_controller_mapping() {
+  if [ -n "${CONTROLLER_MAPPER_PID:-}" ]; then
+    kill "$CONTROLLER_MAPPER_PID" 2>/dev/null || true
+    CONTROLLER_MAPPER_PID=""
+  fi
+}
+
+run_with_capture() {
+  local output_file="$1"
+  shift
+
+  (
+    "$@"
+  ) >"$output_file" 2>&1
+}
+
+record_technical_output() {
+  local output_file="$1"
+
+  if [ -n "${LOG_FILE:-}" ] && [ -w "$(dirname -- "$LOG_FILE")" ]; then
+    cat "$output_file" >> "$LOG_FILE" 2>/dev/null || true
+    return 0
+  fi
+
+  cat "$output_file" >> "$LAUNCH_DEBUG_LOG" 2>/dev/null || true
+}
+
+filter_dialog_output() {
+  local input_file="$1"
+  local output_file="$2"
+
+  awk '
+    !($0 ~ /Warning \(/ || $0 ~ /: Warning \(/)
+  ' "$input_file" > "$output_file"
+}
+
+show_textbox_file() {
+  local title="$1"
+  local file="$2"
+  local height="${3:-22}"
+  local width="${4:-78}"
+
+  dialog --backtitle "$MENU_TITLE" --title "$title" --textbox "$file" "$height" "$width" || true
+}
+
+show_result_textbox() {
+  local title="$1"
+  local file="$2"
+  local height="${3:-22}"
+  local width="${4:-78}"
+
+  show_textbox_file "$title" "$file" "$height" "$width" || true
+}
+
+show_doctor_dialog() {
+  local tmp_out ui_out
+
+  tmp_out="$(mktemp)"
+  ui_out="$(mktemp)"
+  if run_with_capture "$tmp_out" doctor_only; then
+    record_technical_output "$tmp_out"
+    filter_dialog_output "$tmp_out" "$ui_out"
+    show_result_textbox "$MENU_TITLE - Status" "$ui_out" 24 78
+  else
+    record_technical_output "$tmp_out"
+    filter_dialog_output "$tmp_out" "$ui_out"
+    show_result_textbox "$MENU_TITLE - Status (failed)" "$ui_out" 24 78
+  fi
+  rm -f "$tmp_out"
+  rm -f "$ui_out"
+}
+
+show_action_dialog() {
+  local title="$1"
+  local action="$2"
+  local tmp_out ui_out
+
+  tmp_out="$(mktemp)"
+  ui_out="$(mktemp)"
+  if run_with_capture "$tmp_out" "$action"; then
+    record_technical_output "$tmp_out"
+    filter_dialog_output "$tmp_out" "$ui_out"
+    show_result_textbox "$title" "$ui_out" 24 78
+  else
+    record_technical_output "$tmp_out"
+    filter_dialog_output "$tmp_out" "$ui_out"
+    show_result_textbox "$title (failed)" "$ui_out" 24 78
+  fi
+  rm -f "$tmp_out"
+  rm -f "$ui_out"
+}
+
+dialog_confirm_action() {
+  local prompt="$1"
+
+  dialog --backtitle "$MENU_TITLE" --yes-label "Yes" --no-label "No" --yesno "$prompt" 10 54
+}
+
+dialog_menu() {
+  while true; do
+    local choice_file choice rc
+    choice_file="$(mktemp)"
+    if dialog --cancel-label "Exit" --backtitle "$MENU_TITLE" --title " [ Main Menu ] " --menu "Use arrows to move, A to select, B to exit." 15 60 5 \
+      1 "Check status" \
+      2 "Apply DTB patch" \
+      3 "Rollback DTB" \
+      4 "Remove USB gadget service" \
+      5 "Exit" 2> "$choice_file"; then
+      choice="$(<"$choice_file")"
+      rm -f "$choice_file"
+      case "$choice" in
+        1)
+          show_doctor_dialog
+          ;;
+        2)
+          if dialog_confirm_action "Apply DTB patch?"; then
+            show_action_dialog "$MENU_TITLE - Apply" apply_mode
+          fi
+          ;;
+        3)
+          if dialog_confirm_action "Rollback DTB?"; then
+            show_action_dialog "$MENU_TITLE - Rollback" rollback_mode
+          fi
+          ;;
+        4)
+          if dialog_confirm_action "Remove USB gadget service?"; then
+            show_action_dialog "$MENU_TITLE - Remove service" remove_service_mode
+          fi
+          ;;
+        5)
+          return 0
+          ;;
+      esac
+      continue
+    fi
+
+    rc=$?
+    rm -f "$choice_file"
+    case "$rc" in
+      1|255)
+        return 0
+        ;;
+      *)
+        return 0
+        ;;
+    esac
+  done
+}
+
+prepare_console_ui() {
+  local console_num tty_path
+
+  [ -z "${TERM:-}" ] && export TERM=linux
+
+  console_num=1
+  if have_cmd fgconsole; then
+    console_num="$(fgconsole 2>/dev/null || printf '1')"
+  fi
+  case "$console_num" in
+    ''|*[!0-9]*)
+      console_num=1
+      ;;
+  esac
+
+  tty_path="/dev/tty${console_num}"
+  [ -e "$tty_path" ] || tty_path="/dev/tty1"
+
+  if [ -e "$tty_path" ]; then
+    if exec <"$tty_path" >"$tty_path" 2>&1; then
+      printf '\033c' > "$tty_path" || true
+      return 0
+    fi
+  fi
+
+  return 1
+}
+
+cleanup_launcher() {
+  stop_controller_mapping
+  cleanup
+}
+
 doctor_only() {
   need_cmd awk
   need_cmd sed
@@ -405,17 +662,70 @@ install_usb_gadget_service() {
     return 0
   fi
 
-  [ -f "$USB_GADGET_SCRIPT_SRC" ] || die "Missing usb gadget script source: $USB_GADGET_SCRIPT_SRC"
-  [ -f "$USB_GADGET_SERVICE_SRC" ] || die "Missing usb gadget service source: $USB_GADGET_SERVICE_SRC"
   need_cmd systemctl
   need_cmd chmod
+  need_cmd cat
+  need_cmd mkdir
+  need_cmd cp
 
-  mkdir -p "$USB_GADGET_TARGET_BIN_DIR"
-  cp "$USB_GADGET_SCRIPT_SRC" "$USB_GADGET_TARGET_BIN"
-  chmod 755 "$USB_GADGET_TARGET_BIN"
-  copy_file "$USB_GADGET_SERVICE_SRC" "$USB_GADGET_TARGET_UNIT"
+  maybe_sudo mkdir -p "$USB_GADGET_TARGET_BIN_DIR"
+  local gadget_script_tmp="$TMP_DIR/r36s-usb-gadget.sh"
+  local gadget_service_tmp="$TMP_DIR/r36s-usb-gadget.service"
+
+  cat > "$gadget_script_tmp" <<'EOF'
+#!/bin/bash
+set +e
+
+LOG="/home/ark/r36s-usb-gadget.log"
+
+{
+echo "=== R36S USB GADGET START ==="
+date
+
+modprobe -r g_ether 2>/dev/null || true
+modprobe g_ether dev_addr=02:36:36:00:00:02 host_addr=02:36:36:00:00:01
+
+sleep 2
+
+ip link set usb0 up
+ip addr flush dev usb0
+ip addr add 192.168.7.2/24 dev usb0
+
+systemctl start ssh 2>/dev/null || true
+systemctl start sshd 2>/dev/null || true
+
+echo "--- ip addr usb0 ---"
+ip addr show usb0 2>&1
+
+echo "--- modules ---"
+lsmod | grep -Ei "g_ether|u_ether|usb_f|libcomposite|dwc2" || true
+
+echo "--- dmesg ---"
+dmesg | grep -Ei "g_ether|rndis|ether|usb0|dwc2|gadget" | tail -80
+
+echo "=== R36S USB GADGET END ==="
+date
+} >> "$LOG" 2>&1
+EOF
+  cat > "$gadget_service_tmp" <<'EOF'
+[Unit]
+Description=R36S USB Ethernet Gadget
+After=local-fs.target systemd-modules-load.service ssh.service
+Wants=ssh.service
+
+[Service]
+Type=oneshot
+ExecStart=/home/ark/bin/r36s-usb-gadget.sh
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+  maybe_sudo cp "$gadget_script_tmp" "$USB_GADGET_TARGET_BIN"
+  maybe_sudo chmod 755 "$USB_GADGET_TARGET_BIN"
+  maybe_sudo cp "$gadget_service_tmp" "$USB_GADGET_TARGET_UNIT"
   maybe_sudo systemctl daemon-reload
-  maybe_sudo systemctl enable r36s-usb-gadget.service
+  maybe_sudo systemctl enable --now r36s-usb-gadget.service
 }
 
 remove_usb_gadget_service() {
@@ -635,6 +945,86 @@ remove_service_mode() {
   printf 'USB gadget service removed.\n'
 }
 
+pause_for_enter() {
+  printf '\nPress Enter to continue...'
+  read -r _
+}
+
+confirm_dangerous_action() {
+  local prompt="$1"
+  local answer
+
+  printf '%s\n' "$prompt"
+  printf 'Type YES to continue: '
+  read -r answer
+
+  if [ "$answer" != "YES" ]; then
+    printf 'Operation cancelled.\n'
+    return 1
+  fi
+
+  return 0
+}
+
+interactive_menu() {
+  while true; do
+    printf 'R36S DTB Patcher\n\n'
+    printf '1) Check status\n'
+    printf '2) Apply DTB patch\n'
+    printf '3) Rollback DTB\n'
+    printf '4) Remove USB gadget service\n'
+    printf '5) Exit\n'
+    printf '\nSelect an option: '
+
+    local choice
+    read -r choice || return 1
+
+    case "$choice" in
+      1)
+        doctor_only
+        pause_for_enter
+        ;;
+      2)
+        if confirm_dangerous_action 'Apply DTB patch?'; then
+          apply_mode
+        fi
+        pause_for_enter
+        ;;
+      3)
+        if confirm_dangerous_action 'Rollback DTB?'; then
+          rollback_mode
+        fi
+        pause_for_enter
+        ;;
+      4)
+        if confirm_dangerous_action 'Remove USB gadget service?'; then
+          remove_service_mode
+        fi
+        pause_for_enter
+        ;;
+      5)
+        return 0
+        ;;
+      *)
+        printf 'Invalid selection.\n'
+        pause_for_enter
+        ;;
+    esac
+  done
+}
+
+text_menu_entry() {
+  interactive_menu
+}
+
+log_menu_fallback() {
+  local reason="$1"
+
+  {
+    printf '%s: %s\n' "$(date '+%Y-%m-%d %H:%M:%S')" "$reason"
+  } >> "$MENU_FALLBACK_LOG" 2>/dev/null || true
+}
+
 usage() {
   cat <<'EOF'
 Usage:
@@ -646,7 +1036,26 @@ EOF
 }
 
 main() {
-  case "${1:-}" in
+  if [ "$#" -eq 0 ]; then
+    write_launch_debug_log "$@"
+    if prepare_console_ui; then
+      start_controller_mapping || true
+      trap cleanup_launcher EXIT INT TERM
+      if dialog_available; then
+        dialog_menu
+      else
+        text_menu_entry
+      fi
+      cleanup_launcher
+    else
+      log_menu_fallback 'No interactive tty available, printed usage.'
+      usage
+      cleanup_launcher
+    fi
+    return 0
+  fi
+
+  case "$1" in
     --doctor)
       doctor_only
       ;;
@@ -659,7 +1068,7 @@ main() {
     --remove-service)
       remove_service_mode
       ;;
-    -h|--help|"")
+    -h|--help)
       usage
       ;;
     *)
