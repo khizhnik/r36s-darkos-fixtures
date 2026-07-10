@@ -1,0 +1,958 @@
+diff --git a/tools/r36s-dtb-patcher.sh b/tools/r36s-dtb-patcher.sh
+index 9add72c..732b055 100755
+--- a/tools/r36s-dtb-patcher.sh
++++ b/tools/r36s-dtb-patcher.sh
+@@ -10,6 +10,13 @@ PC_RECOVERY_COPY="${R36S_DTB_PATCHER_PC_RECOVERY_COPY:-$BOOT_DIR/rk3326-r36s-lin
+ USB_GADGET_TARGET_BIN_DIR="/home/ark/bin"
+ USB_GADGET_TARGET_BIN="$USB_GADGET_TARGET_BIN_DIR/r36s-usb-gadget.sh"
+ USB_GADGET_TARGET_UNIT="/etc/systemd/system/r36s-usb-gadget.service"
++ES_DUMMY_AUDIO_DROPIN_DIR="/etc/systemd/system/emulationstation.service.d"
++ES_DUMMY_AUDIO_DROPIN="$ES_DUMMY_AUDIO_DROPIN_DIR/r36s-audio.conf"
++ES_HOME_DIR="/home/ark"
++ES_GAME_START_DIR="$ES_HOME_DIR/.emulationstation/scripts/game-start"
++ES_GAME_END_DIR="$ES_HOME_DIR/.emulationstation/scripts/game-end"
++ES_AUDIO_ON_HOOK="$ES_GAME_START_DIR/r36s-audio-on.sh"
++ES_AUDIO_OFF_HOOK="$ES_GAME_END_DIR/r36s-audio-off.sh"
+ 
+ TMP_DIR=""
+ LOG_FILE=""
+@@ -62,6 +69,20 @@ have_cmd() {
+   command -v "$1" >/dev/null 2>&1
+ }
+ 
++human_yes_no_partial() {
++  case "$1" in
++    1|yes|YES)
++      printf 'yes'
++      ;;
++    2|partial|PARTIAL)
++      printf 'partial'
++      ;;
++    *)
++      printf 'no'
++      ;;
++  esac
++}
++
+ copy_file() {
+   local src="$1"
+   local dst="$2"
+@@ -158,6 +179,12 @@ inspect_dts() {
+           have_otg = 1
+         } else if (name == "usb@ff300000") {
+           have_usb = 1
++        } else if (name == "codec" && parent() == "pmic@20") {
++          have_audio_codec = 1
++        } else if (name == "simple-audio-card,codec" && parent() == "rk817-sound") {
++          have_audio_card_codec = 1
++        } else if (name == "gpio3@ff270000") {
++          have_gpio3 = 1
+         }
+ 
+         next
+@@ -188,6 +215,24 @@ inspect_dts() {
+         if (line ~ /^[[:space:]]*dr_mode = /) {
+           usb_has_mode = 1
+         }
++      } else if (current == "codec" && parent() == "pmic@20") {
++        if (line ~ /^[[:space:]]*spk-ctl-gpios = /) {
++          audio_spk_ctl = 1
++        }
++        if (line ~ /^[[:space:]]*spk-mute-delay-ms = /) {
++          audio_spk_mute = 1
++        }
++      } else if (current == "simple-audio-card,codec" && parent() == "rk817-sound") {
++        if (line ~ /^[[:space:]]*spk-con-gpio = /) {
++          audio_spk_con = 1
++        }
++      } else if (current == "gpio3@ff270000") {
++        if (line ~ /^[[:space:]]*phandle = <([^>]+)>;/) {
++          tmp = line
++          sub(/^.*phandle = </, "", tmp)
++          sub(/>;[[:space:]]*$/, "", tmp)
++          gpio3_phandle = tmp
++        }
+       }
+ 
+       if (line ~ /^[[:space:]]*\};[[:space:]]*$/) {
+@@ -206,6 +251,13 @@ inspect_dts() {
+       print "have_usb=" (have_usb ? 1 : 0)
+       print "usb_periph=" (usb_periph ? 1 : 0)
+       print "usb_has_mode=" (usb_has_mode ? 1 : 0)
++      print "have_audio_codec=" (have_audio_codec ? 1 : 0)
++      print "have_audio_card_codec=" (have_audio_card_codec ? 1 : 0)
++      print "have_gpio3=" (have_gpio3 ? 1 : 0)
++      print "audio_spk_ctl=" (audio_spk_ctl ? 1 : 0)
++      print "audio_spk_mute=" (audio_spk_mute ? 1 : 0)
++      print "audio_spk_con=" (audio_spk_con ? 1 : 0)
++      print "gpio3_phandle=" gpio3_phandle
+     }
+   ' "$1"
+ }
+@@ -220,6 +272,8 @@ print_doctor_report() {
+   local have_usb="$7"
+   local usb_periph="$8"
+   local gadget_installed="$9"
++  local audio_noise_present="${10}"
++  local es_dummy_audio_present="${11}"
+ 
+   printf 'R36S DTB Doctor\n\n'
+   printf 'DTB: found\n'
+@@ -249,6 +303,8 @@ print_doctor_report() {
+   fi
+ 
+   printf 'USB gadget service: %s\n' "$(human_yes_no "$gadget_installed")"
++  printf 'Audio DTB patch: %s\n' "$(human_yes_no "$audio_noise_present")"
++  printf 'ES dummy audio: %s\n' "$(human_yes_no_partial "$es_dummy_audio_present")"
+ }
+ 
+ detect_usb_gadget_service() {
+@@ -436,16 +492,23 @@ dialog_confirm_action() {
+   dialog --backtitle "$MENU_TITLE" --yes-label "Yes" --no-label "No" --yesno "$prompt" 10 54
+ }
+ 
++dialog_confirm_experimental_action() {
++  local prompt="$1"
++
++  dialog --backtitle "$MENU_TITLE" --yes-label "Yes" --no-label "No" --yesno "$prompt" 16 78
++}
++
+ dialog_menu() {
+   while true; do
+     local choice_file choice rc
+     choice_file="$(mktemp)"
+-    if dialog --cancel-label "Exit" --backtitle "$MENU_TITLE" --title " [ Main Menu ] " --menu "Use arrows to move, A to select, B to exit." 15 60 5 \
++    if dialog --cancel-label "Exit" --backtitle "$MENU_TITLE" --title " [ Main Menu ] " --menu "Use arrows to move, A to select, B to exit." 16 68 6 \
+       1 "Check status" \
+       2 "Apply DTB patch" \
+       3 "Rollback DTB" \
+       4 "Remove USB gadget service" \
+-      5 "Exit" 2> "$choice_file"; then
++      5 "Reduce Speaker Noise" \
++      6 "Exit" 2> "$choice_file"; then
+       choice="$(<"$choice_file")"
+       rm -f "$choice_file"
+       case "$choice" in
+@@ -468,6 +531,9 @@ dialog_menu() {
+           fi
+           ;;
+         5)
++          reduce_speaker_noise_dialog_menu
++          ;;
++        6)
+           return 0
+           ;;
+       esac
+@@ -520,6 +586,17 @@ cleanup_launcher() {
+   cleanup
+ }
+ 
++restart_emulationstation_after_confirmation() {
++  local prompt="$1"
++
++  if confirm_dangerous_action "$prompt"; then
++    maybe_sudo systemctl restart emulationstation
++    return 0
++  fi
++
++  return 1
++}
++
+ doctor_only() {
+   need_cmd awk
+   need_cmd sed
+@@ -544,9 +621,15 @@ doctor_only() {
+ 
+   eval "$parsed"
+   local gadget_installed=0
++  local audio_noise_present=0
+   if detect_usb_gadget_service; then
+     gadget_installed=1
+   fi
++  if current_audio_noise_patched "$src_dts"; then
++    audio_noise_present=1
++  fi
++  local es_dummy_audio_present
++  es_dummy_audio_present="$(es_dummy_audio_state)"
+ 
+   print_patch_summary "$src_dts"
+   printf '\n'
+@@ -559,7 +642,9 @@ doctor_only() {
+     "$otg_ok" \
+     "$have_usb" \
+     "$usb_periph" \
+-    "$gadget_installed"
++    "$gadget_installed" \
++    "${audio_noise_present:-0}" \
++    "${es_dummy_audio_present:-0}"
+ }
+ 
+ current_patched() {
+@@ -577,6 +662,286 @@ current_patched() {
+   return 1
+ }
+ 
++audio_noise_patched() {
++  local src_dts="$1"
++  local parsed
++  parsed="$(inspect_dts "$src_dts")"
++  eval "$parsed"
++
++  if [ "${have_audio_codec:-0}" -eq 1 ] && [ "${have_audio_card_codec:-0}" -eq 1 ] \
++    && [ "${audio_spk_ctl:-0}" -eq 1 ] && [ "${audio_spk_con:-0}" -eq 1 ]; then
++    return 0
++  fi
++
++  return 1
++}
++
++current_audio_noise_patched() {
++  local src_dts="$1"
++  local parsed
++  parsed="$(inspect_dts "$src_dts")"
++  eval "$parsed"
++
++  if [ "${have_audio_codec:-0}" -eq 1 ] && [ "${have_audio_card_codec:-0}" -eq 1 ] \
++    && [ "${audio_spk_ctl:-0}" -eq 1 ] && [ "${audio_spk_mute:-0}" -eq 1 ] \
++    && [ "${audio_spk_con:-0}" -eq 1 ] && [ -n "${gpio3_phandle:-}" ]; then
++    return 0
++  fi
++
++  return 1
++}
++
++es_dummy_audio_patched() {
++  [ "$(es_dummy_audio_state)" = "yes" ]
++}
++
++es_dummy_audio_state() {
++  local dropin_ok=0
++  local hook_on_ok=0
++  local hook_off_ok=0
++  local any_ok=0
++
++  if [ -f "$ES_DUMMY_AUDIO_DROPIN" ]; then
++    any_ok=1
++    if grep -qxF 'Environment=SDL_AUDIODRIVER=dummy' "$ES_DUMMY_AUDIO_DROPIN"; then
++      dropin_ok=1
++    fi
++  fi
++
++  if [ -e "$ES_AUDIO_ON_HOOK" ]; then
++    any_ok=1
++    if [ -x "$ES_AUDIO_ON_HOOK" ] \
++      && grep -qxF "amixer set 'Playback Path' SPK_HP >/dev/null 2>&1 || true" "$ES_AUDIO_ON_HOOK"; then
++      hook_on_ok=1
++    fi
++  fi
++
++  if [ -e "$ES_AUDIO_OFF_HOOK" ]; then
++    any_ok=1
++    if [ -x "$ES_AUDIO_OFF_HOOK" ] \
++      && grep -qxF "amixer set 'Playback Path' OFF >/dev/null 2>&1 || true" "$ES_AUDIO_OFF_HOOK"; then
++      hook_off_ok=1
++    fi
++  fi
++
++  if [ "$dropin_ok" -eq 1 ] && [ "$hook_on_ok" -eq 1 ] && [ "$hook_off_ok" -eq 1 ]; then
++    printf 'yes'
++  elif [ "$any_ok" -eq 1 ]; then
++    printf 'partial'
++  else
++    printf 'no'
++  fi
++}
++
++managed_es_dummy_audio_dropin_content() {
++  cat <<'EOF'
++[Service]
++Environment=SDL_AUDIODRIVER=dummy
++EOF
++}
++
++managed_es_dummy_audio_start_hook_content() {
++  cat <<'EOF'
++#!/bin/bash
++amixer set 'Playback Path' SPK_HP >/dev/null 2>&1 || true
++EOF
++}
++
++managed_es_dummy_audio_end_hook_content() {
++  cat <<'EOF'
++#!/bin/bash
++amixer set 'Playback Path' OFF >/dev/null 2>&1 || true
++EOF
++}
++
++replace_managed_file_if_needed() {
++  local dest="$1"
++  local new_file="$2"
++  local bak_prefix="$3"
++  local mode="$4"
++  local timestamp
++
++  timestamp="$(date +%Y%m%d-%H%M%S)"
++
++  if [ -f "$dest" ]; then
++    if cmp -s "$dest" "$new_file"; then
++      :
++    else
++      copy_file "$dest" "$dest.$bak_prefix-$timestamp"
++    fi
++  fi
++
++  copy_file "$new_file" "$dest"
++  maybe_sudo chmod "$mode" "$dest" >/dev/null 2>&1 || true
++}
++
++patch_audio_noise_dts() {
++  local input_dts="$1"
++  local output_dts="$2"
++  local gpio3_phandle="$3"
++  local audio_spk_ctl_present="$4"
++  local audio_spk_mute_present="$5"
++  local audio_spk_con_present="$6"
++
++  [ -n "$gpio3_phandle" ] || die "Could not resolve gpio3 phandle from DTS."
++
++  awk \
++    -v gpio3_phandle="$gpio3_phandle" \
++    -v audio_spk_ctl_present="$audio_spk_ctl_present" \
++    -v audio_spk_mute_present="$audio_spk_mute_present" \
++    -v audio_spk_con_present="$audio_spk_con_present" '
++    function node_name(line,   s) {
++      s = line
++      sub(/^[[:space:]]*/, "", s)
++      sub(/\{[[:space:]]*$/, "", s)
++      sub(/^[^[:space:]:]+:[[:space:]]*/, "", s)
++      sub(/[[:space:]]*$/, "", s)
++      return s
++    }
++    function top() {
++      return sp > 0 ? stack[sp] : ""
++    }
++    function parent() {
++      return sp > 1 ? stack[sp - 1] : ""
++    }
++    function push(name) {
++      stack[++sp] = name
++    }
++    function pop() {
++      if (sp > 0) {
++        delete stack[sp]
++        sp--
++      }
++    }
++    function print_audio_codec_inserts() {
++      if (!audio_ctl_inserted && audio_spk_ctl_present != 1) {
++        print "\t\t\tspk-ctl-gpios = <" gpio3_phandle " 0x07 0x00>;"
++        audio_ctl_inserted = 1
++      }
++      if (!audio_mute_inserted && audio_spk_mute_present != 1) {
++        print "\t\t\tspk-mute-delay-ms = <0x32>;"
++        audio_mute_inserted = 1
++      }
++    }
++    function print_audio_card_inserts() {
++      if (!audio_con_inserted && audio_spk_con_present != 1) {
++        print "\t\t\tspk-con-gpio = <" gpio3_phandle " 0x07 0x00>;"
++        audio_con_inserted = 1
++      }
++    }
++    {
++      line = $0
++
++      if (line ~ /\{$/) {
++        name = node_name(line)
++        push(name)
++        print line
++        next
++      }
++
++      current = top()
++      if (current == "codec" && parent() == "pmic@20") {
++        if (line ~ /^[[:space:]]*spk-ctl-gpios = /) {
++          audio_spk_ctl = 1
++        }
++        if (line ~ /^[[:space:]]*spk-mute-delay-ms = /) {
++          audio_spk_mute = 1
++        }
++        if (line ~ /^[[:space:]]*pinctrl-0 = /) {
++          print line
++          print_audio_codec_inserts()
++          next
++        }
++      } else if (current == "simple-audio-card,codec" && parent() == "rk817-sound") {
++        if (line ~ /^[[:space:]]*spk-con-gpio = /) {
++          audio_spk_con = 1
++        }
++        if (line ~ /^[[:space:]]*sound-dai = /) {
++          print line
++          print_audio_card_inserts()
++          next
++        }
++      }
++
++      if (line ~ /^[[:space:]]*\};[[:space:]]*$/) {
++        if (current == "codec" && parent() == "pmic@20") {
++          print_audio_codec_inserts()
++        } else if (current == "simple-audio-card,codec" && parent() == "rk817-sound") {
++          print_audio_card_inserts()
++        }
++        print line
++        pop()
++        next
++      }
++
++      print line
++    }
++  ' "$input_dts" > "$output_dts"
++}
++
++unpatch_audio_noise_dts() {
++  local input_dts="$1"
++  local output_dts="$2"
++
++  awk '
++    function node_name(line,   s) {
++      s = line
++      sub(/^[[:space:]]*/, "", s)
++      sub(/\{[[:space:]]*$/, "", s)
++      sub(/^[^[:space:]:]+:[[:space:]]*/, "", s)
++      sub(/[[:space:]]*$/, "", s)
++      return s
++    }
++    function top() {
++      return sp > 0 ? stack[sp] : ""
++    }
++    function parent() {
++      return sp > 1 ? stack[sp - 1] : ""
++    }
++    function push(name) {
++      stack[++sp] = name
++    }
++    function pop() {
++      if (sp > 0) {
++        delete stack[sp]
++        sp--
++      }
++    }
++    {
++      line = $0
++
++      if (line ~ /\{$/) {
++        name = node_name(line)
++        push(name)
++        print line
++        next
++      }
++
++      current = top()
++      if (current == "codec" && parent() == "pmic@20") {
++        if (line ~ /^[[:space:]]*spk-ctl-gpios = /) {
++          next
++        }
++        if (line ~ /^[[:space:]]*spk-mute-delay-ms = /) {
++          next
++        }
++      } else if (current == "simple-audio-card,codec" && parent() == "rk817-sound") {
++        if (line ~ /^[[:space:]]*spk-con-gpio = /) {
++          next
++        }
++      }
++
++      if (line ~ /^[[:space:]]*\};[[:space:]]*$/) {
++        print line
++        pop()
++        next
++      }
++
++      print line
++    }
++  ' "$input_dts" > "$output_dts"
++}
++
+ patch_dts() {
+   local input_dts="$1"
+   local output_dts="$2"
+@@ -657,6 +1022,195 @@ patch_dts() {
+   ' "$input_dts" > "$output_dts"
+ }
+ 
++patch_audio_noise_mode() {
++  need_cmd awk
++  need_cmd sed
++  need_cmd sha256sum
++  need_cmd cp
++  need_cmd mv
++  need_cmd sync
++  need_cmd dtc
++
++  if [ "${R36S_DTB_PATCHER_SKIP_ARCH:-0}" != "1" ]; then
++    [ "$(uname -m)" = "aarch64" ] || die "This tool must run on aarch64."
++  fi
++  [ -d "$BOOT_DIR" ] || die "Missing /boot directory: $BOOT_DIR"
++  [ -f "$TARGET_DTB" ] || die "Missing target DTB: $TARGET_DTB"
++
++  setup_tmp
++  setup_logging
++
++  local status_dts="$TMP_DIR/audio-status.dts"
++  dtc -I dtb -O dts -o "$status_dts" "$TARGET_DTB"
++
++  local parsed gpio3_phandle
++  parsed="$(inspect_dts "$status_dts")"
++  eval "$parsed"
++
++  if [ "${have_audio_codec:-0}" -ne 1 ] || [ "${have_audio_card_codec:-0}" -ne 1 ] || [ "${have_gpio3:-0}" -ne 1 ]; then
++    die "Target DTS layout is missing required audio nodes."
++  fi
++
++  gpio3_phandle="${gpio3_phandle:-}"
++  if [ -z "$gpio3_phandle" ]; then
++    die "Could not resolve gpio3 phandle from DTS."
++  fi
++
++  if [ "${audio_spk_ctl:-0}" -eq 1 ] && [ "${audio_spk_mute:-0}" -eq 1 ] && [ "${audio_spk_con:-0}" -eq 1 ]; then
++    printf 'Experimental speaker noise patch already applied. Nothing to do.\n'
++    return 0
++  fi
++
++  make_backup "audio-noise"
++
++  local input_dts="$TMP_DIR/audio-input.dts"
++  local patched_dts="$TMP_DIR/audio-patched.dts"
++  local rebuilt_dtb="$TMP_DIR/audio-rebuilt.dtb"
++  local verify_dts="$TMP_DIR/audio-verify.dts"
++  local original_size new_size
++  local rebuilt_sha target_sha
++
++  cp "$doctor_dts" "$input_dts"
++  patch_audio_noise_dts \
++    "$input_dts" \
++    "$patched_dts" \
++    "$gpio3_phandle" \
++    "${audio_spk_ctl:-0}" \
++    "${audio_spk_mute:-0}" \
++    "${audio_spk_con:-0}"
++  dtc -I dts -O dtb -o "$rebuilt_dtb" "$patched_dts"
++
++  [ -s "$rebuilt_dtb" ] || die "dtc produced an empty DTB."
++  original_size="$(stat -c '%s' "$TARGET_DTB")"
++  new_size="$(stat -c '%s' "$rebuilt_dtb")"
++
++  if [ "$new_size" -lt 1024 ]; then
++    die "Rebuilt DTB is too small."
++  fi
++
++  if [ "$new_size" -gt $((original_size * 3)) ] || [ "$new_size" -lt $((original_size / 3)) ]; then
++    die "Rebuilt DTB size looks unreasonable."
++  fi
++
++  rebuilt_sha="$(sha256sum "$rebuilt_dtb" | awk '{print $1}')"
++  dtc -I dtb -O dts -o "$verify_dts" "$rebuilt_dtb"
++  parsed="$(inspect_dts "$verify_dts")"
++  eval "$parsed"
++
++  if [ "${audio_spk_ctl:-0}" -ne 1 ] || [ "${audio_spk_mute:-0}" -ne 1 ] || [ "${audio_spk_con:-0}" -ne 1 ]; then
++    die "Verification failed after audio patch rebuild."
++  fi
++
++  write_temp_replacement "$rebuilt_dtb"
++  sync
++  target_sha="$(sha256sum "$TARGET_DTB" | awk '{print $1}')"
++  [ "$target_sha" = "$rebuilt_sha" ] || die "Target DTB hash mismatch after replacement."
++
++  copy_file "$LOG_FILE" "$BACKUP_DIR/patch.log"
++  {
++    printf 'patch_applied=audio-noise\n'
++    printf 'patch_kind=audio-noise\n'
++    printf 'gpio3_phandle=%s\n' "$gpio3_phandle"
++    printf 'spk_ctl_gpio=gpio3 pin7 active-high\n'
++    printf 'spk_con_gpio=gpio3 pin7 active-high\n'
++  } >> "$BACKUP_DIR/manifest.txt"
++  mirror_log_if_possible
++  printf 'Experimental speaker noise patch applied. Please reboot.\n'
++}
++
++restore_audio_noise_mode() {
++  need_cmd awk
++  need_cmd sha256sum
++  need_cmd cp
++  need_cmd mv
++  need_cmd sync
++
++  if [ "${R36S_DTB_PATCHER_SKIP_ARCH:-0}" != "1" ]; then
++    [ "$(uname -m)" = "aarch64" ] || die "This tool must run on aarch64."
++  fi
++  [ -d "$BOOT_DIR" ] || die "Missing /boot directory: $BOOT_DIR"
++  [ -f "$TARGET_DTB" ] || die "Missing target DTB: $TARGET_DTB"
++
++  setup_tmp
++
++  local status_dts="$TMP_DIR/audio-status.dts"
++  dtc -I dtb -O dts -o "$status_dts" "$TARGET_DTB"
++
++  local parsed
++  parsed="$(inspect_dts "$status_dts")"
++  eval "$parsed"
++
++  if [ "${audio_spk_ctl:-0}" -ne 1 ] && [ "${audio_spk_con:-0}" -ne 1 ] && [ "${audio_spk_mute:-0}" -ne 1 ]; then
++    printf 'Experimental speaker noise patch already absent. Nothing to do.\n'
++    return 0
++  fi
++
++  local backup_dir
++  backup_dir="$(find_latest_backup_by_kind audio-noise)"
++
++  if [ -n "$backup_dir" ] && [ -f "$backup_dir/$TARGET_BASENAME" ] && [ -f "$backup_dir/original.sha256" ]; then
++    local backup_sha target_sha target_tmp
++    backup_sha="$(awk '{print $1}' "$backup_dir/original.sha256" | head -n1)"
++    target_tmp="$BOOT_DIR/.r36s-audio-restore.tmp"
++    copy_file "$backup_dir/$TARGET_BASENAME" "$target_tmp"
++    sync
++    move_file "$target_tmp" "$TARGET_DTB"
++    copy_file "$backup_dir/$TARGET_BASENAME" "$PC_RECOVERY_COPY"
++    target_sha="$(sha256sum "$TARGET_DTB" | awk '{print $1}')"
++    [ "$target_sha" = "$backup_sha" ] || die "Restored DTB hash mismatch."
++    verify_checksum "$backup_dir"
++    sync
++    mirror_log_if_possible
++    printf 'Experimental speaker noise patch restored. Please reboot.\n'
++    return 0
++  fi
++
++  local input_dts="$TMP_DIR/audio-input.dts"
++  local restored_dts="$TMP_DIR/audio-restored.dts"
++  local rebuilt_dtb="$TMP_DIR/audio-restored.dtb"
++  local verify_dts="$TMP_DIR/audio-verify.dts"
++  local original_size new_size
++  local rebuilt_sha target_sha
++  local gpio3_phandle="${gpio3_phandle:-}"
++
++  if [ -z "$gpio3_phandle" ]; then
++    gpio3_phandle="$(printf '%s\n' "$parsed" | awk -F= '/^gpio3_phandle=/ {print $2; exit}')"
++  fi
++  [ -n "$gpio3_phandle" ] || die "Could not resolve gpio3 phandle from DTS."
++
++  cp "$doctor_dts" "$input_dts"
++  unpatch_audio_noise_dts "$input_dts" "$restored_dts"
++  dtc -I dts -O dtb -o "$rebuilt_dtb" "$restored_dts"
++
++  [ -s "$rebuilt_dtb" ] || die "dtc produced an empty DTB."
++  original_size="$(stat -c '%s' "$TARGET_DTB")"
++  new_size="$(stat -c '%s' "$rebuilt_dtb")"
++
++  if [ "$new_size" -lt 1024 ]; then
++    die "Rebuilt DTB is too small."
++  fi
++
++  if [ "$new_size" -gt $((original_size * 3)) ] || [ "$new_size" -lt $((original_size / 3)) ]; then
++    die "Rebuilt DTB size looks unreasonable."
++  fi
++
++  rebuilt_sha="$(sha256sum "$rebuilt_dtb" | awk '{print $1}')"
++  dtc -I dtb -O dts -o "$verify_dts" "$rebuilt_dtb"
++  parsed="$(inspect_dts "$verify_dts")"
++  eval "$parsed"
++
++  if [ "${audio_spk_ctl:-0}" -eq 1 ] || [ "${audio_spk_mute:-0}" -eq 1 ] || [ "${audio_spk_con:-0}" -eq 1 ]; then
++    die "Verification failed after audio patch restore."
++  fi
++
++  write_temp_replacement "$rebuilt_dtb"
++  sync
++  target_sha="$(sha256sum "$TARGET_DTB" | awk '{print $1}')"
++  [ "$target_sha" = "$rebuilt_sha" ] || die "Target DTB hash mismatch after replacement."
++  mirror_log_if_possible
++  printf 'Experimental speaker noise patch restored. Please reboot.\n'
++}
++
+ install_usb_gadget_service() {
+   if [ "${R36S_DTB_PATCHER_SKIP_SERVICE:-0}" = "1" ]; then
+     return 0
+@@ -748,6 +1302,7 @@ remove_usb_gadget_service() {
+ }
+ 
+ make_backup() {
++  local patch_kind="${1:-full}"
+   local timestamp
+   timestamp="$(date +%Y%m%d-%H%M%S)"
+   BACKUP_DIR="$BACKUP_ROOT/$timestamp"
+@@ -766,6 +1321,7 @@ make_backup() {
+     printf 'backup=%s\n' "$BACKUP_DIR/$TARGET_BASENAME"
+     printf 'pc_recovery_copy=%s\n' "$PC_RECOVERY_COPY"
+     printf 'created=%s\n' "$timestamp"
++    printf 'patch_kind=%s\n' "$patch_kind"
+     printf 'source_sha256='
+     sha256sum "$TARGET_DTB" | awk '{print $1}'
+     printf '\n'
+@@ -782,6 +1338,23 @@ find_latest_backup() {
+     | cut -d' ' -f2-
+ }
+ 
++find_latest_backup_by_kind() {
++  local kind="$1"
++  local latest=""
++  local dir manifest
++
++  while IFS= read -r dir; do
++    manifest="$dir/manifest.txt"
++    if [ -f "$manifest" ] && grep -q "^patch_kind=$kind$" "$manifest" 2>/dev/null; then
++      latest="$dir"
++    fi
++  done <<EOF
++$(find "$BACKUP_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%T@ %p\n' 2>/dev/null | sort -n | cut -d' ' -f2-)
++EOF
++
++  printf '%s\n' "$latest"
++}
++
+ verify_checksum() {
+   local backup_dir="$1"
+   (cd "$backup_dir" && sha256sum -c original.sha256)
+@@ -966,6 +1539,220 @@ confirm_dangerous_action() {
+   return 0
+ }
+ 
++experimental_noise_patch_warning() {
++  cat <<'EOF'
++This is an experimental R36S speaker noise reduction patch.
++It adds RK817 speaker amplifier control from known R36S donor DTBs.
++It reduced noise on one tested unit but may not improve all hardware revisions.
++A backup will be created. Reboot is required.
++EOF
++}
++
++experimental_noise_restore_warning() {
++  cat <<'EOF'
++This restores the previous DTB/audio state.
++Use this if sound became worse or your device behaved better before the noise patch.
++Reboot is required.
++EOF
++}
++
++experimental_dummy_audio_patch_warning() {
++  cat <<'EOF'
++This experimental userspace patch makes EmulationStation use SDL dummy audio so it does not keep ALSA playback open while idle.
++It fixed idle menu hiss on one tested R36S-V1.0 2024-09-27 unit.
++Games were still able to use ALSA audio directly in testing.
++Hardware and firmware revisions may vary.
++EOF
++}
++
++experimental_dummy_audio_restore_warning() {
++  cat <<'EOF'
++This removes only the R36S managed EmulationStation dummy audio drop-in.
++Use this if menus, game launching, or audio behavior became worse.
++EOF
++}
++
++patch_es_dummy_audio_mode() {
++  need_cmd grep
++  need_cmd cmp
++  need_cmd cp
++  need_cmd sync
++  need_cmd systemctl
++
++  if [ "${R36S_DTB_PATCHER_SKIP_ARCH:-0}" != "1" ]; then
++    [ "$(uname -m)" = "aarch64" ] || die "This tool must run on aarch64."
++  fi
++
++  setup_tmp
++
++  local current_file="$ES_DUMMY_AUDIO_DROPIN"
++  local new_file="$TMP_DIR/r36s-audio.conf"
++  local hook_on_new="$TMP_DIR/r36s-audio-on.sh"
++  local hook_off_new="$TMP_DIR/r36s-audio-off.sh"
++  local timestamp
++  timestamp="$(date +%Y%m%d-%H%M%S)"
++
++  ensure_dir "$ES_DUMMY_AUDIO_DROPIN_DIR"
++  ensure_dir "$ES_GAME_START_DIR"
++  ensure_dir "$ES_GAME_END_DIR"
++
++  managed_es_dummy_audio_dropin_content > "$new_file"
++  managed_es_dummy_audio_start_hook_content > "$hook_on_new"
++  managed_es_dummy_audio_end_hook_content > "$hook_off_new"
++
++  if es_dummy_audio_patched; then
++    printf 'EmulationStation dummy audio patch already applied. Nothing to do.\n'
++    return 0
++  fi
++
++  if [ -f "$current_file" ] && ! grep -qxF 'Environment=SDL_AUDIODRIVER=dummy' "$current_file"; then
++    copy_file "$current_file" "$ES_DUMMY_AUDIO_DROPIN.bak-$timestamp"
++  fi
++  if [ -f "$ES_AUDIO_ON_HOOK" ] && ! cmp -s "$ES_AUDIO_ON_HOOK" "$hook_on_new"; then
++    copy_file "$ES_AUDIO_ON_HOOK" "$ES_AUDIO_ON_HOOK.bak-$timestamp"
++  fi
++  if [ -f "$ES_AUDIO_OFF_HOOK" ] && ! cmp -s "$ES_AUDIO_OFF_HOOK" "$hook_off_new"; then
++    copy_file "$ES_AUDIO_OFF_HOOK" "$ES_AUDIO_OFF_HOOK.bak-$timestamp"
++  fi
++
++  copy_file "$new_file" "$current_file"
++  maybe_sudo chmod 0644 "$current_file" >/dev/null 2>&1 || true
++  copy_file "$hook_on_new" "$ES_AUDIO_ON_HOOK"
++  copy_file "$hook_off_new" "$ES_AUDIO_OFF_HOOK"
++  maybe_sudo chmod 0755 "$ES_AUDIO_ON_HOOK" "$ES_AUDIO_OFF_HOOK" >/dev/null 2>&1 || true
++  maybe_sudo systemctl daemon-reload
++  printf 'Patch applied.\n\nPlease reboot the device\nto complete this change.\n'
++  return 0
++}
++
++restore_es_dummy_audio_mode() {
++  need_cmd grep
++  need_cmd sync
++  need_cmd systemctl
++
++  if [ "${R36S_DTB_PATCHER_SKIP_ARCH:-0}" != "1" ]; then
++    [ "$(uname -m)" = "aarch64" ] || die "This tool must run on aarch64."
++  fi
++
++  setup_tmp
++
++  local current_file="$ES_DUMMY_AUDIO_DROPIN"
++
++  if [ ! -f "$current_file" ] && [ ! -e "$ES_AUDIO_ON_HOOK" ] && [ ! -e "$ES_AUDIO_OFF_HOOK" ]; then
++    printf 'EmulationStation audio already restored. Nothing to do.\n'
++    return 0
++  fi
++
++  maybe_sudo rm -f "$current_file"
++  maybe_sudo rm -f "$ES_AUDIO_ON_HOOK"
++  maybe_sudo rm -f "$ES_AUDIO_OFF_HOOK"
++  maybe_sudo systemctl daemon-reload
++  printf 'Audio restored.\n\nPlease reboot the device\nto complete this change.\n'
++  return 0
++}
++
++speaker_noise_text_menu() {
++  while true; do
++    printf 'Reduce Speaker Noise (experimental)\n\n'
++    printf '1) Patch DTB Speaker Control\n'
++    printf '2) Restore DTB Speaker Control\n'
++    printf '3) Patch EmulationStation Dummy Audio\n'
++    printf '4) Restore EmulationStation Audio\n'
++    printf '5) Back\n'
++    printf '\nSelect an option: '
++
++    local choice
++    read -r choice || return 1
++
++    case "$choice" in
++      1)
++        if confirm_dangerous_action "$(experimental_noise_patch_warning)"; then
++          patch_audio_noise_mode
++        fi
++        pause_for_enter
++        ;;
++      2)
++        if confirm_dangerous_action "$(experimental_noise_restore_warning)"; then
++          restore_audio_noise_mode
++        fi
++        pause_for_enter
++        ;;
++      3)
++        if confirm_dangerous_action "$(experimental_dummy_audio_patch_warning)"; then
++          patch_es_dummy_audio_mode
++        fi
++        pause_for_enter
++        ;;
++      4)
++        if confirm_dangerous_action "$(experimental_dummy_audio_restore_warning)"; then
++          restore_es_dummy_audio_mode
++        fi
++        pause_for_enter
++        ;;
++      5)
++        return 0
++        ;;
++      *)
++        printf 'Invalid selection.\n'
++        pause_for_enter
++        ;;
++    esac
++  done
++}
++
++reduce_speaker_noise_dialog_menu() {
++  while true; do
++    local choice_file choice rc
++    choice_file="$(mktemp)"
++    if dialog --cancel-label "Back" --backtitle "$MENU_TITLE" --title " Reduce Speaker Noise (experimental) " --menu "This patch is experimental." 16 78 5 \
++      1 "Patch DTB Speaker Control" \
++      2 "Restore DTB Speaker Control" \
++      3 "Patch EmulationStation Dummy Audio" \
++      4 "Restore EmulationStation Audio" \
++      5 "Back" 2> "$choice_file"; then
++      choice="$(<"$choice_file")"
++      rm -f "$choice_file"
++      case "$choice" in
++        1)
++          if dialog_confirm_experimental_action "$(experimental_noise_patch_warning)"; then
++            show_action_dialog "$MENU_TITLE - Reduce Speaker Noise (experimental) - DTB Speaker Control" patch_audio_noise_mode
++          fi
++          ;;
++        2)
++          if dialog_confirm_experimental_action "$(experimental_noise_restore_warning)"; then
++            show_action_dialog "$MENU_TITLE - Reduce Speaker Noise (experimental) - Restore DTB Speaker Control" restore_audio_noise_mode
++          fi
++          ;;
++        3)
++          if dialog_confirm_experimental_action "$(experimental_dummy_audio_patch_warning)"; then
++            show_action_dialog "$MENU_TITLE - Reduce Speaker Noise (experimental) - EmulationStation Dummy Audio" patch_es_dummy_audio_mode
++          fi
++          ;;
++        4)
++          if dialog_confirm_experimental_action "$(experimental_dummy_audio_restore_warning)"; then
++            show_action_dialog "$MENU_TITLE - Reduce Speaker Noise (experimental) - Restore EmulationStation Audio" restore_es_dummy_audio_mode
++          fi
++          ;;
++        5)
++          return 0
++          ;;
++      esac
++      continue
++    fi
++
++    rc=$?
++    rm -f "$choice_file"
++    case "$rc" in
++      1|255)
++        return 0
++        ;;
++      *)
++        return 0
++        ;;
++    esac
++  done
++}
++
+ interactive_menu() {
+   while true; do
+     printf 'R36S DTB Patcher\n\n'
+@@ -973,7 +1760,8 @@ interactive_menu() {
+     printf '2) Apply DTB patch\n'
+     printf '3) Rollback DTB\n'
+     printf '4) Remove USB gadget service\n'
+-    printf '5) Exit\n'
++    printf '5) Reduce Speaker Noise\n'
++    printf '6) Exit\n'
+     printf '\nSelect an option: '
+ 
+     local choice
+@@ -1003,6 +1791,13 @@ interactive_menu() {
+         pause_for_enter
+         ;;
+       5)
++        if dialog_available; then
++          reduce_speaker_noise_dialog_menu
++        else
++          speaker_noise_text_menu
++        fi
++        ;;
++      6)
+         return 0
+         ;;
+       *)
