@@ -1,0 +1,19 @@
+--- a/dts/darkos-devkit-rk3326-r36s-linux.dts
++++ b/dts/darkos-devkit-rk3326-r36s-linux.dts
+@@ -1294,6 +1294,8 @@
+ 				clock-names = "mclk";
+ 				pinctrl-names = "default";
+ 				pinctrl-0 = <0x68>;
++				spk-ctl-gpios = <0x97 0x07 0x00>;
++				spk-mute-delay-ms = <0x32>;
+ 				hp-volume = <0x14>;
+ 				spk-volume = <0x03>;
+ 				status = "okay";
+@@ -3706,6 +3708,7 @@
+ 
+ 		simple-audio-card,codec {
+ 			sound-dai = <0xc3>;
++			spk-con-gpio = <0x97 0x07 0x00>;
+ 		};
+ 	};
+ 
